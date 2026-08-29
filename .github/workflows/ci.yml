@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build -j
+      - name: Run demo
+        run: ./build/async_low_latency_logger
+      - name: Run benchmark harness (skeleton)
+        run: ./build/bench_logger
+
+# Note: this CI only builds/smoke-tests. Real benchmark numbers require
+# the OS-tuned bare-metal box described in the README (CPU isolation,
+# IRQ affinity, pinned governor) — CI runners can't reproduce that
+# environment, so latency numbers are collected and committed manually.
