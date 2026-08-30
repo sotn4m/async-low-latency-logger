@@ -25,28 +25,7 @@ SyncLogger::SyncLogger (std::string_view path)
 SyncLogger::~SyncLogger () = default;
 
 void SyncLogger::log (LogLevel level, std::string_view message) {
-  std::string_view log_level;
-
-  switch (level) {
-    case LogLevel::Trace:
-      log_level = "Trace";
-      break;
-    case LogLevel::Debug:
-      log_level = "Debug";
-      break;
-    case LogLevel::Info:
-      log_level = "Info";
-      break;
-    case LogLevel::Warn:
-      log_level = "Warn";
-      break;
-    case LogLevel::Error:
-      log_level = "Error";
-      break;
-    default:
-      log_level = "Unknown";
-      break;
-  }
+  const auto log_level = to_string_view (level);
 
   auto now = std::chrono::system_clock::now ();
   const auto log_message =

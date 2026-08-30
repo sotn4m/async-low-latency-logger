@@ -24,8 +24,8 @@ synchronous logger under load.
 
 - [x] Milestone 1 — sync baseline logger + benchmark harness (scaffolded,
       implementation TODO)
-- [ ] Milestone 2 — SPSC ring buffer (lock-free)
-- [ ] Milestone 3 — generalize to MPSC
+- [x] Milestone 2 — SPSC ring buffer (lock-free)
+- [x] Milestone 3 — generalize to MPSC
 - [ ] Milestone 4 — overflow policy (drop-on-full + counter)
 - [ ] Milestone 5 — consumer thread: batched drain, deferred formatting, buffered write
 - [ ] Milestone 6 — correctness under concurrency (ThreadSanitizer stress tests)

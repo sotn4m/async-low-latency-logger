@@ -3,9 +3,9 @@
 #include <memory>
 #include <string_view>
 
-namespace alll {
+#include "logger/log_level.hpp"
 
-enum class LogLevel { Trace, Debug, Info, Warn, Error };
+namespace alll {
 
 class SyncLogger {
  public:

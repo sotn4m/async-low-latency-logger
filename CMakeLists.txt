@@ -10,6 +10,7 @@ option(ALLL_BUILD_BENCHMARKS "Build the benchmark harness" ON)
 
 add_library(logger_core
   src/logger/sync_logger.cpp
+  src/logger/async_logger.cpp
 )
 target_include_directories(logger_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
