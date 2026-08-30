@@ -1,41 +1,74 @@
 #include "logger/async_logger.hpp"
-
-// TODO(milestone-5): #include <fstream> and <thread> once Impl actually
-// holds an std::ofstream and std::jthread (removed for now since an
-// unused include is dead weight — add them back when you fill in Impl).
+#include <fstream>
+#include <string_view>
+#include <thread>
 
 namespace alll {
 
-struct AsyncLogger::Impl {
-  // TODO(milestone-5): std::ofstream out_file;
-  // TODO(milestone-5): std::jthread consumer; — construct this LAST in
-  // AsyncLogger's constructor init list / body, after out_file is open,
-  // since the consumer thread starts running immediately and will touch
-  // out_file right away.
+struct AsyncLogger::LoggerImpl {
+  std::ofstream log_file;
+  std::jthread consumer;
+
+  auto write (const LogRecord& log) -> void;
 };
 
-AsyncLogger::AsyncLogger(std::string_view path) : impl_(std::make_unique<Impl>()) {
-  // TODO(milestone-5): open impl_->out_file at `path` (append mode), then
-  // start impl_->consumer running this->consume(...).
-  (void)path;
+auto AsyncLogger::LoggerImpl::write (const LogRecord& log) -> void {
+  const auto level = to_string_view (log.level);
+  const auto message_view = std::string_view (log.message.data (), log.length);
+
+  const auto log_message = std::format ("[{:%Y-%m-%d %H:%M:%S}] {}: {}\n",
+                                        log.timestamp, level, message_view);
+  log_file << log_message;
+  log_file.flush ();  // We should not flush on every message; change later
 }
 
-AsyncLogger::~AsyncLogger() = default;
+AsyncLogger::AsyncLogger (std::string_view path)
+    : logger_ (std::make_unique<LoggerImpl> ()) {
+  logger_->log_file.open (std::string (path), std::ios::out | std::ios::app);
 
-std::size_t AsyncLogger::dropped_count() const noexcept {
-  return dropped_count_.load(std::memory_order_relaxed);
+  if (!logger_->log_file) {
+    throw std::runtime_error ("Failed to open the log file");
+  }
+
+  logger_->consumer = std::jthread (
+      [this] (std::stop_token stop_token) { consume (stop_token); });
 }
 
-void AsyncLogger::push_record(LogRecord&& record) {
-  // TODO(milestone-4/5): if (!ring_.try_push(std::move(record))) increment
-  // dropped_count_ with memory_order_relaxed (see the reasoning in the
-  // header comment) and return. Never retry, never block.
-  (void)record;
+AsyncLogger::~AsyncLogger () = default;
+
+std::size_t AsyncLogger::dropped_count () const noexcept {
+  return dropped_count_.load (std::memory_order_relaxed);
 }
 
-void AsyncLogger::consume(std::stop_token stop_token) {
-  // TODO(milestone-5): see the numbered design notes in the header.
-  (void)stop_token;
+void AsyncLogger::push_record (LogRecord&& record) {
+  if (!buffer_.try_push (std::move (record))) {
+    dropped_count_.fetch_add (1, std::memory_order_relaxed);
+  }
 }
 
-} // namespace alll
+void AsyncLogger::drain_buffer () {
+  while (auto record = buffer_.try_pop ()) {
+    logger_->write (*record);
+  }
+}
+
+void AsyncLogger::consume (std::stop_token stop_token) {
+  // TODO(known, deferred): logger_->write() can throw (disk full, format
+  // error, etc.). Uncaught here, that's std::terminate() for the whole
+  // process, not just a dropped line. Revisit if it actually bites during
+  // benchmarking; deliberately left as-is for now.
+  while (!stop_token.stop_requested ()) {
+    auto record = buffer_.try_pop ();
+
+    if (!record) {
+      std::this_thread::yield ();
+      continue;
+    }
+
+    logger_->write (*record);
+  }
+
+  drain_buffer ();
+}
+
+}  // namespace alll

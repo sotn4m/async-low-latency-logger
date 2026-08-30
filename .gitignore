@@ -1,4 +1,5 @@
 build/
+build-tsan/
 .cache/
 .idea/
 .clangd

@@ -26,9 +26,11 @@ synchronous logger under load.
       implementation TODO)
 - [x] Milestone 2 — SPSC ring buffer (lock-free)
 - [x] Milestone 3 — generalize to MPSC
-- [ ] Milestone 4 — overflow policy (drop-on-full + counter)
-- [ ] Milestone 5 — consumer thread: batched drain, deferred formatting, buffered write
-- [ ] Milestone 6 — correctness under concurrency (ThreadSanitizer stress tests)
+- [x] Milestone 4 — overflow policy (drop-on-full + counter)
+- [x] Milestone 5 — consumer thread: deferred formatting, buffered write.
+      (Flush-per-message is still the policy — flagged in code as a
+      follow-up once milestone 7 has numbers showing what it costs.)
+- [x] Milestone 6 — correctness under concurrency (ThreadSanitizer stress tests)
 - [ ] Milestone 7 — benchmark harness: open-loop load, latency percentiles, sync vs async
 - [ ] Milestone 8 — OS tuning (CPU isolation, IRQ affinity) on the benchmark host
 - [ ] Milestone 9 — run benchmarks, collect results, plots
@@ -70,5 +72,24 @@ tuned-OS vs untuned-OS comparison._
 
 ## Testing
 
-_TBD — filled in at milestone 6: ThreadSanitizer-verified stress tests for
-the lock-free ring buffer._
+GoogleTest suite in `tests/` (fetched via CMake's `FetchContent`, no system
+install needed), covering `SpscRingBuffer`, `MpscRingBuffer`, `SyncLogger`,
+and `AsyncLogger`. Concurrency tests check both correctness (no lost,
+duplicated, or reordered messages under contention) and, for `AsyncLogger`,
+a specific shutdown-hang regression (the destructor must not block forever
+if the consumer thread is idle when shutdown is requested).
+
+```bash
+# normal build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+
+# ThreadSanitizer build — this is the one that actually proves "no data
+# race", not just "values came out right"
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DALLL_ENABLE_TSAN=ON -DALLL_BUILD_BENCHMARKS=OFF
+cmake --build build-tsan -j
+ctest --test-dir build-tsan --output-on-failure
+```
+
+Both configurations run in CI on every push.

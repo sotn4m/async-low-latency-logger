@@ -11,7 +11,20 @@ namespace alll {
 struct SyncLogger::LoggerImpl {
   std::ofstream log_file;
   std::mutex mutex;
+
+  auto write (LogLevel level, std::string_view message) -> void;
 };
+
+auto SyncLogger::LoggerImpl::write (LogLevel level, std::string_view message)
+    -> void {
+  auto now = std::chrono::system_clock::now ();
+  const auto log_message = std::format ("[{:%Y-%m-%d %H:%M:%S}] {}: {}\n", now,
+                                        to_string_view (level), message);
+
+  std::lock_guard lock (mutex);
+  log_file << log_message;
+  log_file.flush ();
+}
 
 SyncLogger::SyncLogger (std::string_view path)
     : logger_ (std::make_unique<LoggerImpl> ()) {
@@ -24,16 +37,8 @@ SyncLogger::SyncLogger (std::string_view path)
 
 SyncLogger::~SyncLogger () = default;
 
-void SyncLogger::log (LogLevel level, std::string_view message) {
-  const auto log_level = to_string_view (level);
-
-  auto now = std::chrono::system_clock::now ();
-  const auto log_message =
-      std::format ("[{:%Y-%m-%d %H:%M:%S}] {}: {}\n", now, log_level, message);
-
-  std::lock_guard lock (logger_->mutex);
-  logger_->log_file << log_message;
-  logger_->log_file.flush ();
+void SyncLogger::write_line (LogLevel level, std::string message) {
+  logger_->write (level, message);
 }
 
 }  // namespace alll
