@@ -23,16 +23,27 @@
 # on every core, full IRQ affinity, and user.slice/system.slice cpuset
 # reset to the full core range.
 #
-# Usage: sudo scripts/run_bench_tuned.sh [bench_binary] [reserved_cpus] [system_cpu]
-#   bench_binary   default: build/bench_logger
+# Usage: sudo scripts/run_bench_tuned.sh [bench_binary] [reserved_cpus] [system_cpu] [iterations]
+#   iterations     default: 1     (repeat runs to characterize run-to-run
+#                                  variance — each run's bench_results.csv
+#                                  is saved separately rather than
+#                                  overwritten; see REPEATS_DIR below)
+#
 #   reserved_cpus  default: 1-7   (cpupower/taskset CPU list syntax)
 #   system_cpu     default: 0
+#   bench_binary   default: build/bench_logger
 
 set -euo pipefail
 
-BENCH_BINARY="${1:-build/bench_logger}"
+ITERATIONS="${1:-1}"
 RESERVED_CPUS="${2:-1-7}"
 SYSTEM_CPU="${3:-0}"
+BENCH_BINARY="${4:-build/bench_logger}"
+
+if ! [[ "$ITERATIONS" =~ ^[0-9]+$ ]] || [[ "$ITERATIONS" -lt 1 ]]; then
+  echo "iterations must be a positive integer, got: $ITERATIONS" >&2
+  exit 1
+fi
 
 if [[ "$EUID" -ne 0 ]]; then
   echo "must be run as root (sudo) — governor/IRQ/cgroup writes require it" >&2
@@ -52,14 +63,24 @@ fi
 NPROC_VAL="$(nproc)"
 FULL_RANGE="0-$((NPROC_VAL - 1))"
 
-log () { echo "[run_bench_tuned] $*"; }
+log() { echo "[run_bench_tuned] $*"; }
 
-cleanup () {
+# Each run's bench_results.csv gets moved here rather than overwriting
+# the last one, so a multi-iteration invocation can be aggregated
+# afterward (mean/stddev across runs) instead of only ever keeping the
+# final run. Created as $SUDO_USER directly so no chown dance is needed.
+REPEATS_DIR="benchmarks/results/repeats/$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ "$ITERATIONS" -gt 1 ]]; then
+  sudo -u "$SUDO_USER" mkdir -p "$REPEATS_DIR"
+  log "saving $ITERATIONS runs to $REPEATS_DIR/"
+fi
+
+cleanup() {
   local status=$?
   log "restoring defaults (exit status $status)"
 
   for gov_file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    [[ -w "$gov_file" ]] && echo powersave > "$gov_file" 2>/dev/null || true
+    [[ -w "$gov_file" ]] && echo powersave >"$gov_file" 2>/dev/null || true
   done
 
   for irq_dir in /proc/irq/*/; do
@@ -67,12 +88,12 @@ cleanup () {
     num="${num##*/}"
     [[ "$num" =~ ^[0-9]+$ ]] || continue
     local affinity_file="/proc/irq/${num}/smp_affinity_list"
-    [[ -w "$affinity_file" ]] && echo "$FULL_RANGE" > "$affinity_file" 2>/dev/null || true
+    [[ -w "$affinity_file" ]] && echo "$FULL_RANGE" >"$affinity_file" 2>/dev/null || true
   done
 
   for slice in user.slice system.slice; do
     local cpuset_file="/sys/fs/cgroup/${slice}/cpuset.cpus"
-    [[ -w "$cpuset_file" ]] && echo "$FULL_RANGE" > "$cpuset_file" 2>/dev/null || true
+    [[ -w "$cpuset_file" ]] && echo "$FULL_RANGE" >"$cpuset_file" 2>/dev/null || true
   done
 
   log "done"
@@ -88,9 +109,9 @@ if grep -qw cpuset /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; then
   for slice in user.slice system.slice; do
     cpuset_file="/sys/fs/cgroup/${slice}/cpuset.cpus"
     if [[ -w "$cpuset_file" ]]; then
-      echo "$SYSTEM_CPU" > "$cpuset_file" 2>/dev/null \
-        && log "confined $slice to cpu $SYSTEM_CPU" \
-        || log "could not confine $slice (continuing without it)"
+      echo "$SYSTEM_CPU" >"$cpuset_file" 2>/dev/null &&
+        log "confined $slice to cpu $SYSTEM_CPU" ||
+        log "could not confine $slice (continuing without it)"
     fi
   done
 else
@@ -105,7 +126,7 @@ for irq_dir in /proc/irq/*/; do
   [[ "$num" =~ ^[0-9]+$ ]] || continue
   affinity_file="${irq}/smp_affinity_list"
   [[ -w "$affinity_file" ]] || continue
-  echo "$SYSTEM_CPU" > "$affinity_file" 2>/dev/null || true
+  echo "$SYSTEM_CPU" >"$affinity_file" 2>/dev/null || true
 done
 log "steered movable IRQs to cpu $SYSTEM_CPU"
 
@@ -123,14 +144,28 @@ fi
 # reservation — see BenchmarkConfig::consumer_cpu/producer_cpu_base
 # there. Nothing needs to be communicated to the process at launch
 # beyond which cpuset it's allowed to run on.
-if command -v systemd-run >/dev/null 2>&1; then
-  log "launching $BENCH_BINARY via systemd-run scope (uid=$SUDO_USER, AllowedCPUs=$RESERVED_CPUS)"
-  systemd-run --scope --quiet --same-dir \
-    --uid="$SUDO_USER" \
-    --slice=bench.slice \
-    -p AllowedCPUs="$RESERVED_CPUS" \
-    -- "$BENCH_BINARY"
-else
-  log "systemd-run not found — falling back to sudo without cgroup cpuset confinement on the benchmark process itself"
-  sudo -u "$SUDO_USER" "$BENCH_BINARY"
-fi
+HAVE_SYSTEMD_RUN=0
+command -v systemd-run >/dev/null 2>&1 && HAVE_SYSTEMD_RUN=1
+
+for i in $(seq -w 1 "$ITERATIONS"); do
+  if [[ "$ITERATIONS" -gt 1 ]]; then
+    log "run $i/$ITERATIONS"
+  fi
+
+  if [[ "$HAVE_SYSTEMD_RUN" -eq 1 ]]; then
+    log "launching $BENCH_BINARY via systemd-run scope (uid=$SUDO_USER, AllowedCPUs=$RESERVED_CPUS)"
+    systemd-run --scope --quiet --same-dir \
+      --uid="$SUDO_USER" \
+      --slice=bench.slice \
+      -p AllowedCPUs="$RESERVED_CPUS" \
+      -- "$BENCH_BINARY"
+  else
+    log "systemd-run not found — falling back to sudo without cgroup cpuset confinement on the benchmark process itself"
+    sudo -u "$SUDO_USER" "$BENCH_BINARY"
+  fi
+
+  if [[ "$ITERATIONS" -gt 1 ]]; then
+    mv bench_results.csv "$REPEATS_DIR/run_${i}.csv"
+    log "saved $REPEATS_DIR/run_${i}.csv"
+  fi
+done
