@@ -1,5 +1,6 @@
 build/
 build-tsan/
+benchmarks/plots/.venv/
 .cache/
 .idea/
 .clangd

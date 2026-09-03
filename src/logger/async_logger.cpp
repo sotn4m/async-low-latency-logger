@@ -1,4 +1,5 @@
 #include "logger/async_logger.hpp"
+#include <chrono>
 #include <fstream>
 #include <string_view>
 #include <thread>
@@ -19,7 +20,7 @@ auto AsyncLogger::LoggerImpl::write (const LogRecord& log) -> void {
   const auto log_message = std::format ("[{:%Y-%m-%d %H:%M:%S}] {}: {}\n",
                                         log.timestamp, level, message_view);
   log_file << log_message;
-  log_file.flush ();  // We should not flush on every message; change later
+  // log_file.flush (); We should avoid flushing every msg
 }
 
 AsyncLogger::AsyncLogger (std::string_view path,
@@ -56,6 +57,7 @@ void AsyncLogger::drain_buffer () {
   while (auto record = buffer_.try_pop ()) {
     logger_->write (*record);
   }
+  logger_->log_file.flush ();
 }
 
 void AsyncLogger::consume (std::stop_token stop_token) {
@@ -63,6 +65,10 @@ void AsyncLogger::consume (std::stop_token stop_token) {
   // error, etc.). Uncaught here, that's std::terminate() for the whole
   // process, not just a dropped line. Revisit if it actually bites during
   // benchmarking; deliberately left as-is for now.
+
+  constexpr static auto kFlushInterval {std::chrono::microseconds {300}};
+  auto next_flush = std::chrono::steady_clock::now () + kFlushInterval;
+
   while (!stop_token.stop_requested ()) {
     auto record = buffer_.try_pop ();
 
@@ -72,6 +78,12 @@ void AsyncLogger::consume (std::stop_token stop_token) {
     }
 
     logger_->write (*record);
+
+    const auto now = std::chrono::steady_clock::now ();
+    if (now >= next_flush) {
+      logger_->log_file.flush ();
+      next_flush = now + kFlushInterval;
+    }
   }
 
   drain_buffer ();
