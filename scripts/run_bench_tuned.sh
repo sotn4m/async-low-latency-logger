@@ -23,7 +23,7 @@
 # on every core, full IRQ affinity, and user.slice/system.slice cpuset
 # reset to the full core range.
 #
-# Usage: sudo scripts/run_bench_tuned.sh [bench_binary] [reserved_cpus] [system_cpu] [iterations]
+# Usage: sudo scripts/run_bench_tuned.sh [iterations] [reserved_cpus] [system_cpu] [bench_binary]
 #   iterations     default: 1     (repeat runs to characterize run-to-run
 #                                  variance — each run's bench_results.csv
 #                                  is saved separately rather than

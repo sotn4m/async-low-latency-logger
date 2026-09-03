@@ -1,6 +1,6 @@
 # async-low-latency-logger
 
-A ring-buffer-backed async logger for C++: application threads never block
+A ring-buffer-based async logger for C++: application threads never block
 on logging, no matter how slow the underlying I/O is. Built to measure and
 document, precisely, how much latency that buys back versus a naive
 synchronous logger under load.
@@ -80,32 +80,105 @@ not a dedicated benchmark box. Rather than boot-time `isolcpus`/
 `nohz_full` kernel parameters (which would require a GRUB edit and a
 reboot, and permanently remove cores from general use whenever the
 machine is booted that way), tuning here is **runtime-only** and fully
-reversible per run:
+reversible per run.
+
+### Why any of this is necessary
+
+A general-purpose Linux desktop is actively working against a
+microsecond-precision benchmark. Its scheduler treats producer and
+consumer threads like any other process — free to migrate them between
+cores, interrupt them to run something else, and let clock speed drift
+down to save power while they're momentarily idle. None of that is a
+bug; it's the OS doing its normal job. It's also exactly the kind of
+noise that shows up as tail latency and drop-rate variance in the
+results below. `scripts/run_bench_tuned.sh` exists to switch that job
+off, temporarily, for a handful of cores.
+
+**CPU affinity (thread pinning)** restricts a thread to one specific
+core via `sched_setaffinity()`, instead of letting the scheduler move it
+wherever it likes. A migrated thread loses whatever it had cached in
+that core's L1/L2 — the next few operations run against cold cache — and
+the migration itself costs scheduling overhead. A pinned thread stays
+put, so its timing stays consistent run to run.
+
+**Process steering (cgroups / cpuset)** solves a problem pinning alone
+doesn't: a thread can be locked to a specific core, but nothing stops
+the *rest* of the machine — browser, IDE, background daemons — from also
+landing on those same cores and competing for them. Linux cgroups
+(control groups) constrain which CPUs a whole group of processes may
+run on. Essentially everything on a systemd-managed machine already
+lives under `user.slice` or `system.slice`, so confining those two to
+one core pushes the entire rest of the system off the reserved cores in
+one move, instead of finding and pinning every individual process by
+hand.
+
+**IRQ affinity** matters for the same reason at the hardware level.
+Interrupts (disk, network card, timer, ...) are handled by whichever CPU
+the kernel's IRQ routing currently favors — by default, often spread
+across every core. If one lands on a reserved core, that core is briefly
+stolen from your thread to run the interrupt handler: exactly the kind
+of jitter this benchmark is trying to measure the absence of.
+`/proc/irq/N/smp_affinity_list` tells the kernel which cores a given
+interrupt is allowed to use.
+
+**CPU governor** addresses a different source of variance: modern CPUs
+scale their clock frequency up and down to save power, and ramping back
+up from an idle/low-power state takes real time — low microseconds to a
+few milliseconds. A thread that's been briefly idle (spinning in the
+ring buffer's busy-wait between messages, say) can find its core running
+at a lower clock than it was moments ago, adding latency that has
+nothing to do with the code being measured. The `performance` governor
+pins a core's frequency near its maximum permanently, trading power and
+heat for consistency.
+
+### What a Linux system needs for this to work
+
+None of the above is exotic, but each piece depends on something
+specific being true — which is why the script checks rather than
+assumes:
+
+- **Root.** Every mechanism above writes to files under `/sys` or
+  `/proc`, or to a cgroup's control files, all of which require
+  elevated privileges.
+- **cgroup v2, with the `cpuset` controller delegated** at the cgroup
+  root (`cgroup.subtree_control`). Default on any modern systemd-managed
+  distribution, but not guaranteed on every setup — the script skips
+  process-steering gracefully rather than forcing it if this isn't true.
+- **`systemd`, specifically `systemd-run`**, to launch the benchmark
+  directly into the right cpuset atomically. Without it, the script
+  falls back to a plain `sudo -u` launch — governor/IRQ tuning still
+  applies, but the process itself isn't cpuset-confined to the reserved
+  cores.
+- **`cpupower`** for the governor step — optional; the script logs a
+  warning and leaves the governor unchanged if it isn't installed.
+
+Everything here is reversible without a reboot, which is the whole point
+of choosing this over `isolcpus`/`nohz_full`: this machine is a daily
+driver, not a dedicated benchmark box, and needs to go back to being a
+normal desktop the moment the benchmark finishes.
+
+### The specific configuration
 
 - **Core layout.** Core 0 is left for the OS/desktop session. Cores 1-7
   are reserved for the benchmark: core 1 for `AsyncLogger`'s consumer
   thread, cores 2-7 for up to 6 producer threads (one core each).
-- **Process steering.** `user.slice`/`system.slice`'s cgroup v2
-  `cpuset.cpus` is temporarily confined to core 0 (best-effort — skipped
-  if the `cpuset` controller isn't delegated), so other processes don't
-  land on the reserved cores.
-- **IRQ affinity.** Movable IRQs (`/proc/irq/*/smp_affinity_list`) are
-  redirected to core 0. Kernel-managed MSI-X IRQs reject the write and
-  are left alone.
-- **CPU governor.** Set to `performance` on cores 1-7 only (via
-  `cpupower`); core 0 stays on the system default.
-- **Thread pinning.** `AsyncLogger`'s consumer thread and each
-  benchmark producer thread self-pin via `sched_setaffinity`
-  (`alll::Affinity` in `include/logger/async_logger.hpp`), targeting a
-  fixed core layout hardcoded in `benchmarks/bench_main.cpp`
+- **Process steering.** `user.slice`/`system.slice`'s `cpuset.cpus` is
+  temporarily confined to core 0.
+- **IRQ affinity.** Movable IRQs redirected to core 0; kernel-managed
+  MSI-X IRQs reject the write and are left alone.
+- **CPU governor.** `performance` on cores 1-7 only, via `cpupower`;
+  core 0 stays on the system default.
+- **Thread pinning.** `AsyncLogger`'s consumer thread and each benchmark
+  producer thread self-pin via `sched_setaffinity` (`alll::Affinity` in
+  `include/logger/async_logger.hpp`), targeting a fixed core layout
+  hardcoded in `benchmarks/bench_main.cpp`
   (`BenchmarkConfig::consumer_cpu`, `BenchmarkConfig::producer_cpu_base`)
-  that matches this script's default reservation. Unlike the rest of
-  the tuning, this isn't
-  conditional on running under the script — `bench_logger` always
-  attempts it. Running it directly (as CI does) is still harmless:
-  pinning to a CPU that exists but isn't specially reserved just
-  succeeds trivially, and pinning to one that doesn't exist just fails
-  and is silently ignored.
+  that matches this script's default reservation. Unlike the rest of the
+  tuning, this isn't conditional on running under the script —
+  `bench_logger` always attempts it. Running it directly (as CI does) is
+  still harmless: pinning to a CPU that exists but isn't specially
+  reserved just succeeds trivially, and pinning to one that doesn't
+  exist just fails and is silently ignored.
 
 Run it with:
 
@@ -114,12 +187,12 @@ sudo scripts/run_bench_tuned.sh
 ```
 
 Tuning (governor/IRQ/cpuset steering) is applied once and left in place
-for a repeated batch of runs via an optional 1th argument — useful for
+for a repeated batch of runs via an optional first argument — useful for
 characterizing run-to-run variance rather than trusting a single sample
 per configuration:
 
 ```bash
-sudo scripts/run_bench_tuned.sh build/bench_logger 10 1-7 0
+sudo scripts/run_bench_tuned.sh 10 1-7 0
 ```
 
 Each run's `bench_results.csv` is saved separately under
