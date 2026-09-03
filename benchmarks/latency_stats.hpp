@@ -3,12 +3,18 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <print>
+#include <format>
+#include <optional>
 #include <ratio>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace alll::bench {
+
+inline constexpr std::string_view kCsvHeader =
+    "logger,threads,n,p50_us,p90_us,p99_us,p99_9_us,p99_99_us,max_us,dropped,"
+    "dropped_rate\n";
 
 struct LatencyStats {
   std::size_t count {0uz};
@@ -23,7 +29,8 @@ struct LatencyStats {
   static auto from_samples (std::vector<std::chrono::nanoseconds>& samples,
                             std::optional<std::size_t> dropped) -> LatencyStats;
 
-  auto print (std::string_view label) const -> void;
+  [[nodiscard]] auto print (std::string_view label,
+                            std::size_t thread_count) const -> std::string;
 };
 
 inline auto LatencyStats::from_samples (
@@ -53,25 +60,27 @@ inline auto LatencyStats::from_samples (
   return stats;
 }
 
-inline auto LatencyStats::print (std::string_view label) const -> void {
+inline auto LatencyStats::print (std::string_view label,
+                                 std::size_t thread_count) const
+    -> std::string {
   const auto us = [] (std::chrono::nanoseconds d) {
     return std::chrono::duration<double, std::micro> {d}.count ();
   };
 
-  auto dropped_msgs = std::string {};
-
+  std::string dropped_col {};
+  std::string dropped_ratio_col {};
   if (async_dropped_messages) {
     const auto dropped = *async_dropped_messages;
     const auto ratio =
         100.0 * static_cast<double> (dropped) / static_cast<double> (count);
-    dropped_msgs =
-        std::format (" dropped: {}/{} ({:.2f}%)", dropped, count, ratio);
+    dropped_col = std::format ("{}", dropped);
+    dropped_ratio_col = std::format ("{:.4f}", ratio);
   }
 
-  std::println (
-      "{:<5} n={:<6} p50={:4.2f}us p90={:6.2f}us p99={:6.2f}us "
-      "p99.9={:6.2f}us p99.99={:6.2f}us max={:7.2f}us {}",
-      label, count, us (p50), us (p90), us (p99), us (p999), us (p9999),
-      us (max), dropped_msgs);
+  return std::format (
+      "{},{},{},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{},{}\n", label,
+      thread_count, count, us (p50), us (p90), us (p99), us (p999), us (p9999),
+      us (max), dropped_col, dropped_ratio_col);
 }
+
 }  // namespace alll::bench

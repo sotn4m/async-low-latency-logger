@@ -1,11 +1,14 @@
 #pragma once
 
+#include <sched.h>
+
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <functional>
 #include <memory>
 #include <stop_token>
 #include <string_view>
@@ -17,8 +20,7 @@ namespace alll {
 
 inline constexpr std::size_t kMessageCapacity = 200;
 inline constexpr std::size_t kBufferCapacity =
-    1uz << 16;  // 65536 slots — tune later; milestone 7's benchmark sweeps will
-                // want this configurable rather than fixed, revisit then.
+    1uz << 16;  // 65536 slots — tune later;
 
 struct LogRecord {
   std::chrono::system_clock::time_point timestamp;
@@ -27,9 +29,30 @@ struct LogRecord {
   std::array<char, kMessageCapacity> message {};
 };
 
+// Pins the calling thread to `cpu` via sched_setaffinity.
+struct Affinity {
+  std::size_t cpu;
+
+  void operator() () const noexcept {
+    cpu_set_t set;
+    CPU_ZERO (&set);
+
+    if (cpu >= CPU_SETSIZE) {
+      return;
+    }
+
+    CPU_SET (cpu, &set);
+
+    if (sched_setaffinity (0, sizeof (set), &set) != 0) {
+      return;
+    }
+  }
+};
+
 class AsyncLogger {
  public:
-  explicit AsyncLogger (std::string_view path);
+  explicit AsyncLogger (std::string_view path,
+                        std::function<void ()> cpu_affinity = {});
   ~AsyncLogger ();
 
   AsyncLogger (const AsyncLogger&) = delete;
@@ -39,7 +62,7 @@ class AsyncLogger {
   auto log (LogLevel level, std::format_string<Args...> fmt, Args&&... args)
       -> void;
 
-  [[nodiscard]] std::size_t dropped_count () const noexcept;
+  [[nodiscard]] auto dropped_count () const noexcept -> std::size_t;
 
  private:
   auto push_record (LogRecord&& record) -> void;

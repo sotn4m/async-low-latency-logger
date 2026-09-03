@@ -22,7 +22,8 @@ auto AsyncLogger::LoggerImpl::write (const LogRecord& log) -> void {
   log_file.flush ();  // We should not flush on every message; change later
 }
 
-AsyncLogger::AsyncLogger (std::string_view path)
+AsyncLogger::AsyncLogger (std::string_view path,
+                          std::function<void ()> cpu_affinity)
     : logger_ (std::make_unique<LoggerImpl> ()) {
   logger_->log_file.open (std::string (path), std::ios::out | std::ios::app);
 
@@ -30,13 +31,18 @@ AsyncLogger::AsyncLogger (std::string_view path)
     throw std::runtime_error ("Failed to open the log file");
   }
 
-  logger_->consumer = std::jthread (
-      [this] (std::stop_token stop_token) { consume (stop_token); });
+  logger_->consumer =
+      std::jthread ([this, cpu_affinity] (std::stop_token stop_token) {
+        if (cpu_affinity) {
+          cpu_affinity ();
+        }
+        consume (stop_token);
+      });
 }
 
 AsyncLogger::~AsyncLogger () = default;
 
-std::size_t AsyncLogger::dropped_count () const noexcept {
+auto AsyncLogger::dropped_count () const noexcept -> std::size_t {
   return dropped_count_.load (std::memory_order_relaxed);
 }
 
