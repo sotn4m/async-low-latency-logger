@@ -20,7 +20,9 @@ namespace alll {
 
 inline constexpr std::size_t kMessageCapacity = 200;
 inline constexpr std::size_t kBufferCapacity =
-    1uz << 16;  // 65536 slots — tune later;
+    1uz << 18;  // 262144 slots (54MB). Was 1<<16 (65536, 13.5MB) — raised after
+                // a sweep showed drop rate dropping from 3.76% to 0.00% at 6
+                // threads and 30.28% to 5.10% at overload; see README Results.
 
 struct LogRecord {
   std::chrono::system_clock::time_point timestamp;
@@ -69,7 +71,7 @@ class AsyncLogger {
   auto drain_buffer () -> void;
   auto consume (std::stop_token stop_token) -> void;
 
-  MpscRingBuffer<LogRecord, kBufferCapacity> buffer_;
+  std::unique_ptr<MpscRingBuffer<LogRecord, kBufferCapacity>> buffer_;
   std::atomic<std::size_t> dropped_count_ {0};
 
   struct LoggerImpl;

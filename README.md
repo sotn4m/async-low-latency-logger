@@ -55,6 +55,9 @@ producer thread N ┘     lock-free, fixed        deferred format,
       reported in Results (2 of 8 producer threads target nonexistent cpus
       8/9 and silently fail to pin).
 - [x] Milestone 11 — Hardware / OS Tuning / Results sections filled in
+- [x] Milestone 12 — `kBufferCapacity` default raised 65536 → 262144 (see Results).
+- [ ] Milestone 13 — re-collect the n=200 pinned/unpinned comparison at the
+      new 262144 default (current Results table is at the old 65536 one).
 - [ ] Stretch — NUMA-aware placement, io_uring writer, structured logging
 
 ## Build
@@ -343,4 +346,40 @@ threads before; here pinned is better-median at overload and roughly a
 wash at 6) — rather than force a new explanation, this is read as
 another instance of the cross-session `SyncLogger` placement sensitivity
 already on record, not a new, separate finding.
+
+**Buffer capacity sweep (async only, pinned, 300µs flush, one tuned run
+per point — not n=200)**: `kBufferCapacity` was a hardcoded "tune later"
+constant, never swept until now.
+
+| capacity | memory | 6-thread drop | overload drop |
+|---:|---:|---:|---:|
+| 16384 (1/4x) | 3.4 MB | 12.88% | 35.96% |
+| 65536 (old default, n=200) | 13.5 MB | 3.76% ± 0.38 | 30.28% ± 5.53 |
+| 262144 (4x, new default) | 54.0 MB | 0.00% | 5.10% |
+
+Capacity is the dominant lever on drop rate in this project — a bigger
+effect than either affinity or flush policy. The relationship is
+monotonic across the whole tested range: shrinking the buffer to 1/4
+size roughly triples the drop rate at both points; growing it to 4x
+took 6-thread drops to zero and overload's drop rate down by ~6x.
+Single runs, not n=200 — but the gaps are large multiples of the n=200
+baseline's own stdev (±0.38 at 3.76%), so this isn't close either way,
+same standard already applied to the flush-policy finding. Given the
+memory cost is trivial on this host (54MB vs. 32GB RAM) against a
+drop-rate win this large, `kBufferCapacity` is now 262144 by default
+(`include/logger/async_logger.hpp`) — the pinned/unpinned table above
+was collected at the old 65536 default and is not yet re-collected at
+the new one.
+
+Raising the capacity also surfaced a real, previously-latent bug:
+`AsyncLogger` held its `MpscRingBuffer` by value, so `sizeof(AsyncLogger)`
+scaled directly with `kBufferCapacity` — at 65536 that was already 13.5MB
+(84% of this host's 16MB default thread stack, and larger than the
+common 8MB default elsewhere), and at 262144 it became 54MB, which
+segfaulted a test that constructs `AsyncLogger` as a stack-local
+variable. Fixed by heap-allocating the ring buffer
+(`std::unique_ptr<MpscRingBuffer<...>>`), making `AsyncLogger` small and
+stack-safe regardless of capacity. This was latent at every capacity
+tested here, not something the sweep introduced — it just made an
+existing risk immediate.
 

@@ -25,7 +25,8 @@ auto AsyncLogger::LoggerImpl::write (const LogRecord& log) -> void {
 
 AsyncLogger::AsyncLogger (std::string_view path,
                           std::function<void ()> cpu_affinity)
-    : logger_ (std::make_unique<LoggerImpl> ()) {
+    : buffer_ (std::make_unique<MpscRingBuffer<LogRecord, kBufferCapacity>> ()),
+      logger_ (std::make_unique<LoggerImpl> ()) {
   logger_->log_file.open (std::string (path), std::ios::out | std::ios::app);
 
   if (!logger_->log_file) {
@@ -48,13 +49,13 @@ auto AsyncLogger::dropped_count () const noexcept -> std::size_t {
 }
 
 void AsyncLogger::push_record (LogRecord&& record) {
-  if (!buffer_.try_push (std::move (record))) {
+  if (!buffer_->try_push (std::move (record))) {
     dropped_count_.fetch_add (1, std::memory_order_relaxed);
   }
 }
 
 void AsyncLogger::drain_buffer () {
-  while (auto record = buffer_.try_pop ()) {
+  while (auto record = buffer_->try_pop ()) {
     logger_->write (*record);
   }
   logger_->log_file.flush ();
@@ -70,7 +71,7 @@ void AsyncLogger::consume (std::stop_token stop_token) {
   auto next_flush = std::chrono::steady_clock::now () + kFlushInterval;
 
   while (!stop_token.stop_requested ()) {
-    auto record = buffer_.try_pop ();
+    auto record = buffer_->try_pop ();
 
     if (!record) {
       std::this_thread::yield ();
