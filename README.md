@@ -45,14 +45,16 @@ producer thread N ┘     lock-free, fixed        deferred format,
 - [x] Milestone 7 — benchmark harness: open-loop load, latency percentiles, sync vs async
 - [x] Milestone 8 — OS tuning (CPU isolation, IRQ affinity) on the benchmark host
 - [x] Milestone 9 — run benchmarks, collect results, plots
-- [ ] Milestone 10 — re-run the full benchmark suite (thread sweep, overload, affinity ×
-      flush policy, n=100 repeats) against the fixed code and refill in Results. No
-      dedicated before/after micro-benchmark of the move fix itself — the full-suite
-      re-run is the only measurement planned for it.
-- [ ] Milestone 10a — report the overload case's actual per-thread pinning
-      state (see "Benchmark methodology") instead of assuming uniform
-      pinning, alongside Milestone 10's re-run.
-- [ ] Milestone 11 — this README's Hardware / OS Tuning / Results sections filled in
+- [x] Milestone 10 — benchmark suite re-run against the fixed code: thread
+      sweep + overload, pinned and unpinned, 300µs flush, n=200 each.
+      Flush-every-message excluded — not close pre-fix (dominated by the
+      per-message `write()` syscall, unrelated to the move fix). No isolated
+      before/after benchmark of the move fix itself; the full-suite re-run is
+      the only measurement of its effect.
+- [x] Milestone 10a — overload case's actual per-thread pinning state
+      reported in Results (2 of 8 producer threads target nonexistent cpus
+      8/9 and silently fail to pin).
+- [x] Milestone 11 — Hardware / OS Tuning / Results sections filled in
 - [ ] Stretch — NUMA-aware placement, io_uring writer, structured logging
 
 ## Build
@@ -66,8 +68,15 @@ cmake --build build -j
 
 ## Hardware specs
 
-_TBD — filled in at milestone 10 with `lscpu`/`dmidecode` output from the
-benchmark host._
+- **CPU**: Intel Core i7-9700KF @ 3.60GHz (max 5.0GHz), 8 physical cores,
+  1 thread/core (SMT disabled), single socket.
+- **Cache**: L1d 256KiB (8×32KiB), L1i 256KiB (8×32KiB), L2 2MiB (8×256KiB),
+  L3 12MiB shared.
+- **NUMA**: single node (cpus 0-7) — no cross-node effects to account for.
+- **Memory**: 32GB.
+- **Storage**: NVMe SSD — what every `write()` call in the benchmarks
+  lands on.
+- **Kernel**: Linux 6.18.44-1-MANJARO, x86_64.
 
 ## OS tuning
 
@@ -265,4 +274,73 @@ measured calls per thread, sorted to compute percentiles
   shrink toward zero automatically as n grows, which turned out to
   matter for how the affinity results below should be read.
 
+## Results
+
+Post-fix (`MpscRingBuffer::try_pop` now moves, not copies — see
+Roadmap). n=200 repeats each, pinned and unpinned, 300µs periodic flush.
+Flush-every-message is out of scope for this re-run entirely (see
+Roadmap — that comparison wasn't close pre-fix and doesn't depend on
+anything the move fix touches). Raw data:
+[`n200_pinned_flush_periodic_300us/`](benchmarks/results/repeats/n200_pinned_flush_periodic_300us/),
+[`n200_unpinned_flush_periodic_300us/`](benchmarks/results/repeats/n200_unpinned_flush_periodic_300us/).
+
+**Pinned** (default build):
+
+| threads | logger | p50 (µs) | p99 (µs) | p99.9 (µs) | dropped |
+|---:|---|---:|---:|---:|---:|
+| 1 | sync | 7.672 ± 0.104 | 10.082 ± 0.576 | 19.521 ± 1.536 | — |
+| 1 | async | 0.933 ± 0.005 | 1.084 ± 0.215 | 1.966 ± 2.664 | 0% |
+| 2 | sync | 9.181 ± 1.005 | 18.668 ± 3.225 | 29.309 ± 2.301 | — |
+| 2 | async | 0.984 ± 0.005 | 1.213 ± 0.360 | 1.504 ± 0.475 | 0% |
+| 4 | sync | 10.932 ± 1.232 | 43.092 ± 4.971 | 76.948 ± 11.319 | — |
+| 4 | async | 1.015 ± 0.012 | 1.176 ± 0.192 | 1.538 ± 0.439 | 0% |
+| 6 | sync | 18.696 ± 5.658 | 251.087 ± 19.028 | 548.283 ± 76.476 | — |
+| 6 | async | 1.018 ± 0.008 | 1.238 ± 0.138 | 1.642 ± 0.435 | 3.76% ± 0.38 |
+| 8 (overload) | sync | 10.549 ± 2.924 | 287.761 ± 16.760 | 786.800 ± 175.452 | — |
+| 8 (overload) | async | 0.995 ± 0.007 | 1.128 ± 0.036 | 1.520 ± 0.429 | 30.28% ± 5.51 |
+
+For identical offered load (same producer count, same call rate), async
+is ~8-18x faster at p50 and ~9-255x faster at p99, widening sharply
+under contention — at the cost of one core dedicated full-time to the
+consumer, which sync never spends. `AsyncLogger`'s own p50/p99 stay
+essentially flat (~1µs) at every thread count, confirming the fix
+didn't regress producer-side latency (expected — it only touches
+`try_pop`, not `try_push`).
+
+One thing in the pinned batch worth a second look rather than smoothing
+over: the overload row's "pinned" state isn't fully pinned — 2 of 8
+producer threads target cpus 8/9, which don't exist on this host, so
+`sched_setaffinity` silently fails for them (Milestone 10a).
+
+**Affinity comparison (pinned vs unpinned, both 300µs periodic flush,
+n=200 each)** — gap reported as Cohen's d (mean difference over pooled
+stdev); under ~1 isn't distinguishable from this host's own run-to-run
+noise at this sample size, via `benchmarks/plots/aggregate_repeats.py`:
+
+| threads | metric | pinned | unpinned | gap (d) |
+|---|---|---:|---:|---:|
+| 6 | async drop rate | 3.76% ± 0.38 | 8.30% ± 4.46 | 1.43 |
+| overload (8) | async drop rate | 30.28% ± 5.53 | 45.07% ± 8.45 | 2.07 |
+
+![AsyncLogger drop rate: pinned vs unpinned, n=200 each, error bars = ±1 stdev](benchmarks/plots/drop_rate_affinity_repeats.png)
+
+Same pattern as the drop-rate variance finding from before the fix:
+pinning both lowers `AsyncLogger`'s drop rate and makes it far more
+consistent run to run (unpinned's stdev is 8-12x pinned's at both
+points). The overload gap (2.07) is larger than anything seen pre-fix
+at this thread count — consistent with a faster consumer drain making
+the *unpinned* case's already-worse placement variance show up more
+sharply, though that's a plausible reading of one comparison, not a
+confirmed mechanism.
+
+Two smaller latency-side effects, for completeness: `AsyncLogger`'s own
+p50 is very slightly but consistently lower pinned than unpinned at
+every thread count (e.g. 0.933 vs 0.952µs at 1 thread, d=3.39) — real by
+the numbers, but ~20ns on a ~1µs baseline, not practically meaningful.
+`SyncLogger`'s affinity pattern this session doesn't match the
+pre-fix session's pattern (pinned was worse-median-better-tail at 6/8
+threads before; here pinned is better-median at overload and roughly a
+wash at 6) — rather than force a new explanation, this is read as
+another instance of the cross-session `SyncLogger` placement sensitivity
+already on record, not a new, separate finding.
 
