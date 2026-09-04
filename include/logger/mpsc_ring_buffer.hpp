@@ -123,7 +123,7 @@ auto MpscRingBuffer<T, Capacity>::try_pop () -> std::optional<T> {
     return std::nullopt;
   }
 
-  auto result = slots_[pos & kMask].data;
+  auto result = std::move (slots_[pos & kMask].data);
   slots_[pos & kMask].sequence.store (pos + Capacity,
                                       std::memory_order_release);
   read_.store (pos + 1, std::memory_order_relaxed);
