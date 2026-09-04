@@ -18,11 +18,16 @@ Async logging is **8-20x faster** than sync at every percentile
 measured, and stays flat (~1µs) under load where sync's tail blows out
 to hundreds of microseconds. The more interesting finding: switching
 the consumer's flush policy from per-message to a 300µs periodic
-interval cut dropped messages by roughly 10x — and a 50-run repeated
-comparison found CPU affinity's own effect on drop rate *likely* real
-but not statistically proven at that sample size, reported as such
-rather than overclaimed from a single run. Full methodology, data, and
-the affinity statistics are in [Results](#results) below.
+interval cut dropped messages by roughly 10x. CPU affinity's effect on
+drop rate was checked at n=10, 50, and 200 repeated runs each: real and
+stable (~1.4 effect size) at the 8-thread overload case, smaller and
+noisier at 6 threads than a single n=50 batch suggested. The n=200 data
+also turned up something the drop-rate framing missed entirely:
+`SyncLogger`'s own latency is affinity-sensitive too, and its
+*unpinned* numbers turned out not to be reproducible across collection
+sessions hours apart — direct evidence that the isolation is doing
+real work, not just a plausible-sounding rationale. Full methodology,
+data, and the affinity statistics are in [Results](#results) below.
 
 ![Enqueue latency: sync vs async](benchmarks/plots/latency_by_threads.png)
 
@@ -175,10 +180,27 @@ normal desktop the moment the benchmark finishes.
   (`BenchmarkConfig::consumer_cpu`, `BenchmarkConfig::producer_cpu_base`)
   that matches this script's default reservation. Unlike the rest of the
   tuning, this isn't conditional on running under the script —
-  `bench_logger` always attempts it. Running it directly (as CI does) is
-  still harmless: pinning to a CPU that exists but isn't specially
-  reserved just succeeds trivially, and pinning to one that doesn't
-  exist just fails and is silently ignored.
+  `bench_logger` (as currently committed) always attempts it. Running it
+  directly (as CI does) is still harmless: pinning to a CPU that exists
+  but isn't specially reserved just succeeds trivially, and pinning to
+  one that doesn't exist just fails and is silently ignored. **Note for
+  the "unpinned" results below**: since this call is unconditional in
+  the current code, there's no build-time or run-time toggle to disable
+  it. The "unpinned" batches in [Results](#results) were still run under
+  `scripts/run_bench_tuned.sh` — cores 1-7 still cpuset-reserved, IRQs
+  still steered to core 0, governor still forced to `performance` on
+  1-7, identically to the "pinned" batches — from a build with the
+  `alll::Affinity{cpu}()`/`Affinity` constructor calls temporarily
+  commented out. So "unpinned" doesn't mean unisolated: producer and
+  consumer threads still can't leave the reserved 7-core set or share it
+  with the rest of the desktop, they just aren't nailed to one specific
+  core each within it — the kernel scheduler is free to place and
+  migrate them across cores 1-7 as it likes. That makes this a genuine
+  single-variable comparison (static per-thread core pinning vs. free
+  migration within the same reservation), but it's not reproducible
+  today just by skipping the script — the shipped code always pins, and
+  skipping the script on top of that would additionally drop the
+  cpuset/IRQ/governor tuning, a third condition never measured here.
 
 Run it with:
 
@@ -246,9 +268,14 @@ measured calls per thread, sorted to compute percentiles
   `sync_overload`/`async_overload` in each results CSV) since it's
   deliberately pathological, not a data point on it.
 - **Affinity × flush policy** — beyond the thread-count sweep, two
-  independent knobs were each run with and without: whether producer
-  and consumer threads are pinned (see "OS tuning"/"Thread pinning"
-  above), and how often `AsyncLogger`'s consumer flushes to disk —
+  independent knobs were each run with and without. "Affinity" is
+  specifically per-thread `sched_setaffinity` pinning (`alll::Affinity`,
+  commented out of the source and rebuilt to produce the "unpinned"
+  runs — see the note under "Thread pinning" above); the surrounding
+  `scripts/run_bench_tuned.sh` tuning (cpuset/IRQ/governor) was applied
+  identically for both, so this isolates thread placement specifically,
+  not isolation-vs-none. The second knob is how often `AsyncLogger`'s
+  consumer flushes to disk —
   after *every* message (the original policy, milestone 5's TODO) vs.
   a fixed 300µs interval (`kFlushInterval` in `src/logger/async_logger.cpp`
   — chosen over a shorter 50µs interval also tried during development,
@@ -259,13 +286,15 @@ measured calls per thread, sorted to compute percentiles
 - **Repeated runs (affinity, specifically)** — a single run per
   configuration isn't enough to tell a real effect from this desktop's
   own run-to-run noise, so the pinned-vs-unpinned comparison at 300µs
-  flush was re-run 10 and then 50 times each via
+  flush was re-run 10, then 50, then 200 times each via
   `scripts/run_bench_tuned.sh`'s iteration argument, saved to
   [`benchmarks/results/repeats/`](benchmarks/results/repeats/)
-  (`n10_*`/`n50_*` directories) and aggregated with
-  `benchmarks/plots/aggregate_repeats.py`, which reports each gap in
-  units of pooled standard deviation — below ~1-2σ isn't distinguishable
-  from noise at these sample sizes.
+  (`n10_*`/`n50_*`/`n200_*` directories) and aggregated with
+  `benchmarks/plots/aggregate_repeats.py`, which reports each gap as a
+  Cohen's-d-style effect size (mean difference over the pooled stdev of
+  the raw per-run values) rather than a significance test — it doesn't
+  shrink toward zero automatically as n grows, which turned out to
+  matter for how the affinity results below should be read.
 
 ## Results
 
@@ -278,12 +307,12 @@ python3 -m venv benchmarks/plots/.venv   # first time only
 benchmarks/plots/.venv/bin/pip install -r benchmarks/plots/requirements.txt
 benchmarks/plots/.venv/bin/python benchmarks/plots/plot_results.py           # latency
 benchmarks/plots/.venv/bin/python benchmarks/plots/plot_comparison.py        # drop rate
-benchmarks/plots/.venv/bin/python benchmarks/plots/plot_affinity_repeats.py  # affinity, n=50
+benchmarks/plots/.venv/bin/python benchmarks/plots/plot_affinity_repeats.py  # affinity, n=200
 
 # affinity repeated-run comparison as text (stdlib only, no venv needed)
 python3 benchmarks/plots/aggregate_repeats.py \
-  benchmarks/results/repeats/n50_pinned_flush_periodic_300us \
-  benchmarks/results/repeats/n50_unpinned_flush_periodic_300us
+  benchmarks/results/repeats/n200_pinned_flush_periodic_300us \
+  benchmarks/results/repeats/n200_unpinned_flush_periodic_300us
 ```
 
 ![Enqueue latency: sync vs async](benchmarks/plots/latency_by_threads.png)
@@ -310,54 +339,123 @@ comparison isn't close — every single-run gap here is a large multiple
 of the run-to-run noise characterized below, so it doesn't need the
 repeated-run treatment to trust.
 
-**Affinity's effect is smaller, and a single run isn't enough to
-resolve it — which is exactly why it got the repeated-run treatment.**
-A single pinned-vs-unpinned run at 300µs flush originally looked
-identical (3.57% either way at 6 threads) — that reading doesn't hold
-up. Aggregating 50 runs of each
-(`benchmarks/results/repeats/n50_pinned_flush_periodic_300us/` vs.
-`n50_unpinned_flush_periodic_300us/`):
+**Affinity's effect on drop rate is real, but the n=50-only read of it
+was subtly wrong about *why* it looked convincing.** A single
+pinned-vs-unpinned run at 300µs flush originally looked identical
+(3.57% either way at 6 threads) — that reading doesn't hold up. The
+comparison was re-run at n=10, n=50, and n=200 for each configuration:
 
-| | pinned (n=50) | unpinned (n=50) | gap |
-|---|---:|---:|---:|
-| drop rate @ 6 threads | 3.56% ± 0.39 | 8.49% ± 4.29 | 1.62σ |
-| drop rate @ overload | 34.84% ± 8.48 | 46.01% ± 7.25 | 1.42σ |
+| threads | n | pinned | unpinned | gap (Cohen's d) |
+|---|---:|---:|---:|---:|
+| 6 | 10 | 3.72% ± 0.52 | 7.61% ± 4.99 | 1.09 |
+| 6 | 50 | 3.56% ± 0.39 | 8.49% ± 4.29 | 1.62 |
+| 6 | 200 | 4.27% ± 0.33 | 7.26% ± 4.03 | 1.05 |
+| overload (8) | 10 | 34.95% ± 6.08 | 47.17% ± 10.73 | 1.40 |
+| overload (8) | 50 | 34.84% ± 8.48 | 46.01% ± 7.25 | 1.42 |
+| overload (8) | 200 | 34.67% ± 7.36 | 45.22% ± 7.69 | 1.40 |
 
-![AsyncLogger drop rate: pinned vs unpinned, n=50 each, error bars = ±1 stdev](benchmarks/plots/drop_rate_affinity_repeats.png)
+![AsyncLogger drop rate: pinned vs unpinned, n=200 each, error bars = ±1 stdev](benchmarks/plots/drop_rate_affinity_repeats.png)
 
-The error bars visibly overlap at both points — that's the picture
-version of "not past 2σ." But look at their *width*: pinned's bar is
-tight at 6 threads while unpinned's spans roughly 4-13%, which is the
-variance finding below in one glance.
+The n=10→50 jump at 6 threads (1.09 → 1.62) was originally read as
+momentum building toward "proven, given enough runs." n=200 corrects
+that: the gap moved *back down* to 1.05, not up. That's expected once
+you notice what this "gap" actually is — a Cohen's-d-style effect size
+(mean difference over the pooled stdev of the raw per-run values), not
+a significance test. Unlike a standard error, it has no built-in
+mechanism that shrinks or grows toward a threshold as n increases; more
+samples just make it a more precise estimate of whatever the true
+effect size already is. **8-thread overload is the effect that held
+up**: 1.40 → 1.42 → 1.40 across 10, 50, and 200 runs — an estimate that
+doesn't move as the sample quadruples is one that's already converged,
+and ~1.4 is a large effect by the conventional (if informal) reading of
+Cohen's d. **6 threads is smaller and noisier than the n=50 batch
+suggested** — the true effect size looks closer to ~1.0-1.1. The
+variance finding is unaffected either way: pinned's drop-rate stdev
+stays roughly an order of magnitude tighter than unpinned's at every
+sample size (0.33-0.52 vs. 3.99-4.99 at 6 threads) — that part was
+never in question.
 
-Unpinned's mean is now consistently more than double pinned's at 6
-threads, and the gap *grew* going from 10 to 50 runs (1.09σ → 1.62σ)
-rather than shrinking toward zero — the direction you'd expect if this
-is a real effect that a single run was too noisy to resolve cleanly.
-But at both sample sizes it stays just under the ~2σ bar for calling it
-resolved, so the honest conclusion is: **likely real, not proven** —
-getting it past 2σ would take roughly another 3-4x the samples
-(~150-200 runs), which wasn't worth the runtime for this project.
+**The n=200 batches also surfaced a latency-side affinity effect the
+drop-rate framing never looked for:**
 
-The clearer, better-supported finding is **variance, not the mean**:
-pinned's drop rate is far more *consistent* run to run than unpinned's
-— stdev of 0.39 vs. 4.29 at 6 threads, an ~11x difference that held up
-identically at both n=10 and n=50. Whatever affinity's exact effect on
-the average turns out to be, it clearly makes the consumer's behavior
-more predictable, which for a low-latency logger may matter as much as
-the average itself.
+| threads | metric | pinned (n=200) | unpinned (n=200) | gap |
+|---|---|---:|---:|---:|
+| 1 | p50 | 6.245µs ± 0.174 | 7.947µs ± 0.134 | 10.97 |
+| 1 | p99 | 8.648µs ± 0.549 | 10.855µs ± 0.419 | 4.52 |
+| 4 | p50 | 8.576µs ± 1.326 | 11.035µs ± 1.404 | 1.80 |
+| 4 | p99 | 26.253µs ± 6.312 | 51.977µs ± 4.309 | 4.76 |
+| 6 | p50 | 24.143µs ± 1.086 | 12.699µs ± 2.699 | -5.56 |
+| 6 | p99 | 57.727µs ± 23.504 | 269.216µs ± 3.978 | 12.55 |
+| overload (8) | p50 | 24.672µs ± 2.045 | 11.531µs ± 2.083 | -6.37 |
+| overload (8) | p99 | 134.396µs ± 21.436 | 296.197µs ± 11.639 | 9.38 |
 
-One side effect of disabling `Affinity` for the unpinned batch: it also
-unpins *producer* threads (the same call is used for both `SyncLogger`
-and `AsyncLogger` benchmarks), and at the 8-thread overload case two of
-the eight producer pin targets (cpus 8 and 9, from
-`producer_cpu_base=2`) don't exist on this 8-core machine — so even the
-"pinned" overload run has 2 of 8 producer threads effectively floating.
-Worth knowing before reading too much into the overload numbers
-specifically. `SyncLogger`'s own p50 at overload showed the single
-strongest effect in this whole comparison (24.5µs pinned vs. 32.5µs
-unpinned, 6.59σ at n=50) — a reminder that this toggle isn't isolated
-to `AsyncLogger`'s consumer the way the rest of this section frames it.
+`SyncLogger`'s median and tail move in *opposite* directions depending
+on concurrency. At 1 and 4 threads, pinning wins on both (lower p50
+*and* lower p99). At 6 threads and the 8-thread overload case, pinning's
+median gets *worse* (24.1µs vs. 12.7µs at 6 threads) while its tail
+gets dramatically *better* (57.7µs vs. 269.2µs p99 — and unpinned's p99
+stdev is only ±4.0, so it's consistently bad, not occasionally
+spiking).
+
+Both conditions ran under identical `scripts/run_bench_tuned.sh`
+isolation (see the note under "Thread pinning" above), so IRQ/governor/
+process steering can't be what's driving this — it was applied the same
+way on both sides. The remaining variable is static core assignment vs.
+free migration within the reserved set, and there's a concrete reason
+it would show up exactly like this: `SyncLogger` never spawns a
+consumer thread, but `BenchmarkConfig::producer_cpu_base` still starts
+producers at cpu 2 unconditionally, reserved for `AsyncLogger`'s
+consumer. **Pinned `SyncLogger` runs never use cpu 1 at all** — 6
+threads get crammed onto exactly 6 cores (2-7) with zero slack, while
+cpu 1 sits idle the entire run. **Unpinned threads are free to migrate
+onto cpu 1**, giving them a 7th core of headroom the pinned layout never
+touches — plausibly enough to explain a better median at the cost of
+migration jitter setting a worse worst-case (though pinned's *own* wide
+p99 stdev, ±23.5, says the pinned side isn't perfectly consistent
+either — something is still making its tail jump around even with a
+static layout). This is a hypothesis consistent with the pattern and
+with the code as written, not confirmed by tracing scheduler placement
+during a run. `AsyncLogger`'s own p50/p99 barely move under the same
+comparison (≤0.03µs difference at every thread count, on a ~1µs
+baseline) — consistent with the "Results at a glance" claim that
+affinity and flush policy affect the consumer's drain rate, not the
+producer's enqueue cost; `AsyncLogger` benchmarks do use cpu 1 (for the
+consumer) in both conditions, so this particular idle-core effect
+doesn't apply to them.
+
+(Caveat on the overload row specifically: `producer_cpu_base=2` targets
+cpus 2-9 for 8 producer threads, but this machine only has cpus 0-7 —
+so `Affinity`'s `sched_setaffinity` call fails and is silently ignored
+for 2 of the 8 producer threads even in the "pinned" build, leaving
+them floating within whatever the process's cpuset allows. Combined
+with cpu 1 sitting unused by the other 6 pinned `SyncLogger` threads,
+the "pinned" overload row is a messier, less-clean layout than the
+"unpinned" one — where all 8 threads simply load-balance freely across
+the 7 reserved cores. Read it as directionally informative, not exact.)
+
+**The more important finding sits underneath that table, not in it.**
+The n=50 batch (collected ~18:00) and the n=200 batch (collected
+~20:37-21:59, the same day) are, in principle, two samples of the same
+comparison. `SyncLogger`'s *pinned* numbers agree closely between them
+— every thread count is within ~2% (24.53µs vs. 24.67µs at overload,
+24.22µs vs. 24.14µs at 6 threads) despite being collected hours apart.
+Its *unpinned* numbers do not agree — they swing by 30-64% between the
+two batches, and not even in a consistent direction (down at 1/2/4
+threads, up at 6/overload). That's not measurement error in either
+batch, and it isn't `run_bench_tuned.sh`'s isolation either — both
+batches ran under identical cpuset/IRQ/governor tuning, so that part is
+controlled for on both sides. What's left is specifically the static
+core assignment: pinned always puts a given producer thread on the same
+physical core, run after run, session after session, so whatever that
+core's cache/branch-predictor/frequency state looks like is the same
+every time. Unpinned leaves that placement up to the kernel scheduler,
+which is free to make a different call depending on whatever else is
+happening on the 7 reserved cores at that exact moment — and evidently
+does, by enough to matter. Read the unpinned latency numbers above as
+*a* snapshot of one scheduler's placement decisions on 2026-09-03
+evening, not as *the* unpinned latency characteristic of `SyncLogger`
+— that quantity isn't well-defined without pinning down which core (or
+cores) a given run actually landed on.
 
 None of the drop-rate story above is the ring buffer's fault — it's
 lock-free and sized generously at 65,536 slots. It's the consumer's

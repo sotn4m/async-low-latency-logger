@@ -35,6 +35,8 @@
 
 set -euo pipefail
 
+SCRIPT_START="$SECONDS"
+
 ITERATIONS="${1:-1}"
 RESERVED_CPUS="${2:-1-7}"
 SYSTEM_CPU="${3:-0}"
@@ -96,7 +98,10 @@ cleanup() {
     [[ -w "$cpuset_file" ]] && echo "$FULL_RANGE" >"$cpuset_file" 2>/dev/null || true
   done
 
+  local elapsed=$((SECONDS - SCRIPT_START))
   log "done"
+  printf '[run_bench_tuned] total time: %02d:%02d:%02d\n' \
+    $((elapsed / 3600)) $(((elapsed % 3600) / 60)) $((elapsed % 60))
   exit "$status"
 }
 

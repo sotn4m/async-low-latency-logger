@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Bar chart with error bars (mean ± stdev) for the pinned-vs-unpinned
-drop-rate comparison, from the n=50 repeated-run batches — the visual
+drop-rate comparison, from the n=200 repeated-run batches — the visual
 counterpart to aggregate_repeats.py's text table.
 
 Usage:
   benchmarks/plots/.venv/bin/python benchmarks/plots/plot_affinity_repeats.py \
       [pinned_dir] [unpinned_dir] [output_dir]
 
-Defaults to benchmarks/results/repeats/n50_pinned_flush_periodic_300us
-and .../n50_unpinned_flush_periodic_300us.
+Defaults to benchmarks/results/repeats/n200_pinned_flush_periodic_300us
+and .../n200_unpinned_flush_periodic_300us.
 """
 
 import csv
@@ -24,8 +24,8 @@ import matplotlib.pyplot as plt
 SCRIPT_DIR = Path (__file__).resolve ().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 REPEATS_DIR = REPO_ROOT / "benchmarks" / "results" / "repeats"
-DEFAULT_PINNED = REPEATS_DIR / "n50_pinned_flush_periodic_300us"
-DEFAULT_UNPINNED = REPEATS_DIR / "n50_unpinned_flush_periodic_300us"
+DEFAULT_PINNED = REPEATS_DIR / "n200_pinned_flush_periodic_300us"
+DEFAULT_UNPINNED = REPEATS_DIR / "n200_unpinned_flush_periodic_300us"
 
 # (threads, logger, x-axis label)
 POINTS = [
